@@ -44,12 +44,125 @@ function convertToRawCount(internationalInputString) {
   return Math.round(numericValue * factor);
 }
 
-function convertToDollars(number) {
-  const rawCount = convertToRawCount(number);
+const payoutConfig = Object.freeze({
+  homeTimelineShare: 0.06,
+  premiumViewerWeight: 1,
+  engagementQualityWeight: 1,
+  accountFitWeight: 1,
+  postFormatWeight: 1,
+  articleFormatWeight: 1.15,
+  accountBaseRatePer1k: 0.5,
+  rangeLowMultiplier: 0.6,
+  rangeHighMultiplier: 1.5,
+});
 
-  const processed = rawCount * 0.000026;
-  if (processed < 0.1) return processed.toFixed(5);
-  return processed.toFixed(2);
+function estimateEffectiveVerifiedViews({
+  totalViews,
+  homeTimelineShare = payoutConfig.homeTimelineShare,
+  premiumViewerWeight = payoutConfig.premiumViewerWeight,
+  formatWeight = payoutConfig.postFormatWeight,
+  engagementQualityWeight = payoutConfig.engagementQualityWeight,
+  accountFitWeight = payoutConfig.accountFitWeight,
+}) {
+  if (!Number.isFinite(totalViews)) return NaN;
+
+  return (
+    totalViews *
+    homeTimelineShare *
+    premiumViewerWeight *
+    formatWeight *
+    engagementQualityWeight *
+    accountFitWeight
+  );
+}
+
+function estimatePayout({
+  accountBaseRatePer1k = payoutConfig.accountBaseRatePer1k,
+  ...effectiveViewArgs
+}) {
+  const effectiveVerifiedViews = estimateEffectiveVerifiedViews(
+    effectiveViewArgs,
+  );
+  if (!Number.isFinite(effectiveVerifiedViews)) return NaN;
+
+  return (effectiveVerifiedViews / 1000) * accountBaseRatePer1k;
+}
+
+function estimatePayoutRange({
+  rangeLowMultiplier = payoutConfig.rangeLowMultiplier,
+  rangeHighMultiplier = payoutConfig.rangeHighMultiplier,
+  ...estimateArgs
+}) {
+  const mid = estimatePayout(estimateArgs);
+  const effectiveVerifiedViews = estimateEffectiveVerifiedViews(estimateArgs);
+
+  if (!Number.isFinite(mid) || !Number.isFinite(effectiveVerifiedViews)) {
+    return {
+      low: 0,
+      mid: 0,
+      high: 0,
+      effectiveVerifiedViews: 0,
+    };
+  }
+
+  return {
+    low: mid * rangeLowMultiplier,
+    mid,
+    high: mid * rangeHighMultiplier,
+    effectiveVerifiedViews,
+  };
+}
+
+function formatCurrencyFull(amount) {
+  if (!Number.isFinite(amount)) return "$0.000";
+  return `$${amount.toFixed(3)}`;
+}
+
+function formatCurrencyCompact(amount) {
+  if (!Number.isFinite(amount)) return "0.000";
+  if (amount < 1000) return amount.toFixed(3);
+
+  const units = [
+    { value: 1000000000, suffix: "b" },
+    { value: 1000000, suffix: "m" },
+    { value: 1000, suffix: "k" },
+  ];
+
+  for (const unit of units) {
+    if (amount >= unit.value) {
+      return `${(amount / unit.value).toFixed(1)}${unit.suffix}`;
+    }
+  }
+
+  return amount.toFixed(3);
+}
+
+function formatEffectiveVerifiedViews(effectiveVerifiedViews) {
+  if (!Number.isFinite(effectiveVerifiedViews)) return "0";
+  return effectiveVerifiedViews.toLocaleString(undefined, {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 1,
+  });
+}
+
+function buildPayoutDisplay(number, options = {}) {
+  const totalViews = convertToRawCount(number);
+  const range = estimatePayoutRange({
+    totalViews,
+    ...options,
+  });
+  const mid = formatCurrencyCompact(range.mid);
+
+  return {
+    text: `~$${mid}`,
+    textAfterIcon: `~${mid}`,
+    title: [
+      `Low: ${formatCurrencyFull(range.low)}`,
+      `Mid: ${formatCurrencyFull(range.mid)}`,
+      `High: ${formatCurrencyFull(range.high)}`,
+      `Effective verified views: ${formatEffectiveVerifiedViews(range.effectiveVerifiedViews)}`,
+    ].join("\n"),
+  };
 }
 
 const globalSelectors = {};
@@ -67,18 +180,25 @@ innerSelectors.articleViewAmount = "span div:first-child span span span";
 
 function doWork() {
   const viewCounts = Array.from(
-    document.querySelectorAll(globalSelectors.viewCount)
+    document.querySelectorAll(globalSelectors.viewCount),
   );
 
-  const articleViewDateSections = document.querySelectorAll(globalSelectors.articleDate);
+  const articleViewDateSections = document.querySelectorAll(
+    globalSelectors.articleDate,
+  );
 
   if (articleViewDateSections.length) {
     // the rootDateViewsSection will always be the parent->parent->parent of the last element of the articleDate querySelectorAll result
-    let rootDateViewsSection = articleViewDateSections[articleViewDateSections.length - 1].parentElement.parentElement.parentElement;
+    let rootDateViewsSection =
+      articleViewDateSections[articleViewDateSections.length - 1].parentElement
+        .parentElement.parentElement;
 
     // if there is one child, that means it's an old tweet with no viewcount
     // if there are more than 4, we already added the paycheck value
-    if (rootDateViewsSection?.children?.length !== 1 && rootDateViewsSection?.children.length < 4) {
+    if (
+      rootDateViewsSection?.children?.length !== 1 &&
+      rootDateViewsSection?.children.length < 4
+    ) {
       // clone 2nd and 3rd child of rootDateViewsSection
       const clonedDateViewSeparator =
         rootDateViewsSection?.children[1].cloneNode(true);
@@ -87,23 +207,28 @@ function doWork() {
       // insert clonedDateViews and clonedDateViewsTwo after the 3rd child we just cloned
       rootDateViewsSection?.insertBefore(
         clonedDateViewSeparator,
-        rootDateViewsSection?.children[2].nextSibling
+        rootDateViewsSection?.children[2].nextSibling,
       );
       rootDateViewsSection?.insertBefore(
         clonedDateView,
-        rootDateViewsSection?.children[3].nextSibling
+        rootDateViewsSection?.children[3].nextSibling,
       );
 
       // get view count value from 'clonedDateViewsTwo'
       const viewCountValue = clonedDateView?.querySelector(
-        innerSelectors.articleViewAmount
+        innerSelectors.articleViewAmount,
       )?.textContent;
-      const dollarAmount = convertToDollars(viewCountValue);
+      const payoutDisplay = buildPayoutDisplay(viewCountValue, {
+        formatWeight: payoutConfig.articleFormatWeight,
+      });
 
       // replace textContent in cloned clonedDateViews (now 4th child) with converted view count value
-      clonedDateView.querySelector(
-        innerSelectors.articleViewAmount
-      ).textContent = "$" + dollarAmount;
+      const articleAmountArea = clonedDateView.querySelector(
+        innerSelectors.articleViewAmount,
+      );
+      articleAmountArea.textContent = payoutDisplay.text;
+      articleAmountArea.title = payoutDisplay.title;
+      clonedDateView.title = payoutDisplay.title;
 
       // remove 'views' label
       clonedDateView.querySelector(`span`).children[1].remove();
@@ -140,11 +265,16 @@ function doWork() {
     // get the number of views and calculate & set the dollar amount
     const dollarBox = view.parentElement.nextSibling.firstChild;
     const viewCount = view.querySelector(
-      innerSelectors.viewAmount
+      innerSelectors.viewAmount,
     )?.textContent;
     if (viewCount == undefined) continue;
     const dollarAmountArea = dollarBox.querySelector(innerSelectors.viewAmount);
-    dollarAmountArea.textContent = convertToDollars(viewCount);
+    const payoutDisplay = buildPayoutDisplay(viewCount, {
+      formatWeight: payoutConfig.postFormatWeight,
+    });
+    dollarAmountArea.textContent = payoutDisplay.textAfterIcon;
+    dollarAmountArea.title = payoutDisplay.title;
+    dollarBox.title = payoutDisplay.title;
   }
 }
 
@@ -159,12 +289,15 @@ function throttle(func, limit) {
       lastRan = Date.now();
     } else {
       clearTimeout(lastFunc);
-      lastFunc = setTimeout(function () {
-        if (Date.now() - lastRan >= limit) {
-          func.apply(context, args);
-          lastRan = Date.now();
-        }
-      }, limit - (Date.now() - lastRan));
+      lastFunc = setTimeout(
+        function () {
+          if (Date.now() - lastRan >= limit) {
+            func.apply(context, args);
+            lastRan = Date.now();
+          }
+        },
+        limit - (Date.now() - lastRan),
+      );
     }
   };
 }
