@@ -165,6 +165,47 @@ function buildPayoutDisplay(number, options = {}) {
   };
 }
 
+function rewriteArticleMetric(node, sourceValue, replacementText) {
+  if (!node) return;
+
+  const textNodes = [];
+  const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+
+  while (walker.nextNode()) {
+    textNodes.push(walker.currentNode);
+  }
+
+  const normalizedSourceValue = sourceValue?.trim();
+  let amountReplaced = false;
+
+  for (const textNode of textNodes) {
+    const currentValue = textNode.nodeValue ?? "";
+    const trimmedValue = currentValue.trim();
+
+    if (
+      !amountReplaced &&
+      normalizedSourceValue &&
+      trimmedValue.includes(normalizedSourceValue)
+    ) {
+      textNode.nodeValue = currentValue.replace(
+        normalizedSourceValue,
+        replacementText,
+      );
+      amountReplaced = true;
+      continue;
+    }
+
+    if (/^views?$/i.test(trimmedValue)) {
+      textNode.nodeValue = "";
+    }
+  }
+
+  if (!amountReplaced) {
+    const textContainer = node.querySelector("span") ?? node;
+    textContainer.textContent = replacementText;
+  }
+}
+
 const globalSelectors = {};
 globalSelectors.postCounts = `[role="group"][id*="id__"]:only-child`;
 globalSelectors.articleDate = `[role="article"][aria-labelledby*="id__"][tabindex="-1"] time`;
@@ -188,50 +229,53 @@ function doWork() {
   );
 
   if (articleViewDateSections.length) {
-    // the rootDateViewsSection will always be the parent->parent->parent of the last element of the articleDate querySelectorAll result
-    let rootDateViewsSection =
-      articleViewDateSections[articleViewDateSections.length - 1].parentElement
-        .parentElement.parentElement;
+    const articleRoots = Array.from(articleViewDateSections, (articleDate) =>
+      articleDate?.parentElement?.parentElement?.parentElement,
+    ).filter(Boolean);
 
-    // if there is one child, that means it's an old tweet with no viewcount
-    // if there are more than 4, we already added the paycheck value
-    if (
-      rootDateViewsSection?.children?.length !== 1 &&
-      rootDateViewsSection?.children.length < 4
-    ) {
-      // clone 2nd and 3rd child of rootDateViewsSection
-      const clonedDateViewSeparator =
-        rootDateViewsSection?.children[1].cloneNode(true);
-      const clonedDateView = rootDateViewsSection?.children[2].cloneNode(true);
-
-      // insert clonedDateViews and clonedDateViewsTwo after the 3rd child we just cloned
-      rootDateViewsSection?.insertBefore(
-        clonedDateViewSeparator,
-        rootDateViewsSection?.children[2].nextSibling,
-      );
-      rootDateViewsSection?.insertBefore(
-        clonedDateView,
-        rootDateViewsSection?.children[3].nextSibling,
-      );
-
-      // get view count value from 'clonedDateViewsTwo'
-      const viewCountValue = clonedDateView?.querySelector(
+    for (const rootDateViewsSection of new Set(articleRoots)) {
+      // if there is one child, that means it's an old tweet with no viewcount
+      if (rootDateViewsSection.children?.length === 1) continue;
+      if (rootDateViewsSection.children?.length < 3) continue;
+      const articleViewMetric = rootDateViewsSection.children[2];
+      const originalViewCountValue = articleViewMetric?.querySelector(
         innerSelectors.articleViewAmount,
       )?.textContent;
-      const payoutDisplay = buildPayoutDisplay(viewCountValue, {
+
+      if (!originalViewCountValue) continue;
+      if (!/views?/i.test(articleViewMetric.textContent ?? "")) continue;
+
+      // normalize the footer before inserting our estimate so repeated
+      // MutationObserver runs cannot accumulate duplicate nodes.
+      while (rootDateViewsSection.children.length > 3) {
+        rootDateViewsSection.lastElementChild?.remove();
+      }
+
+      // clone 2nd and 3rd child of rootDateViewsSection
+      const clonedDateViewSeparator =
+        rootDateViewsSection.children[1].cloneNode(true);
+      const clonedDateView = rootDateViewsSection.children[2].cloneNode(true);
+
+      // insert the estimate pair directly after the native view count pair
+      rootDateViewsSection.insertBefore(
+        clonedDateViewSeparator,
+        rootDateViewsSection.children[2].nextSibling,
+      );
+      rootDateViewsSection.insertBefore(
+        clonedDateView,
+        clonedDateViewSeparator.nextSibling,
+      );
+
+      const payoutDisplay = buildPayoutDisplay(originalViewCountValue, {
         formatWeight: payoutConfig.articleFormatWeight,
       });
 
-      // replace textContent in cloned clonedDateViews (now 4th child) with converted view count value
-      const articleAmountArea = clonedDateView.querySelector(
-        innerSelectors.articleViewAmount,
+      rewriteArticleMetric(
+        clonedDateView,
+        originalViewCountValue,
+        payoutDisplay.text,
       );
-      articleAmountArea.textContent = payoutDisplay.text;
-      articleAmountArea.title = payoutDisplay.title;
       clonedDateView.title = payoutDisplay.title;
-
-      // remove 'views' label
-      clonedDateView.querySelector(`span`).children[1].remove();
     }
   }
 
